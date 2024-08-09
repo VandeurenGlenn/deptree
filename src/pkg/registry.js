@@ -77,6 +77,29 @@ function getSemverXRange(version) {
             : `${major}.x.x`;
 }
 
+async function fetchGithubPackage(version) {
+    // todo: use gh api(requires api key)
+    let result;
+
+    try {
+        try {
+            const response = await fetch(
+                `https://raw.githubusercontent.com/${version.split(':')[1]}/main/package.json`,
+            );
+            result = await response.json();
+        } catch (error) {
+            throw new Error(error);
+        }
+    } catch (error) {
+        const response = await fetch(
+            `https://raw.githubusercontent.com/${version.split(':')[1]}/master/package.json`,
+        );
+
+        result = await response.json();
+    }
+    return result;
+}
+
 /**
  * @param {string} name
  * @param {string} [version]
@@ -84,13 +107,18 @@ function getSemverXRange(version) {
  */
 export async function getModule(name, version) {
     ({ name, version } = normalizeModuleInfo(name, version));
-
-    if (version && !semver.validRange(version))
+    // ignores github installed packages for now
+    if (version && !version.startsWith('github:') && !semver.validRange(version))
         throw new Error(`Invalid package version: '${version}' for '${name}'`);
-    const cacheKey = createModuleKey(name, version && getSemverXRange(version));
+
+    const cacheKey = createModuleKey(
+        name,
+        version.startsWith(`github:`) ? version : version && getSemverXRange(version),
+    );
 
     const cachedModule = moduleCache.get(cacheKey);
-    if (cachedModule) return cachedModule.resolve;
+
+    if (cachedModule) return cachedModule.module ?? cachedModule.resolve;
 
     /** @type {ModuleCacheEntry} */
     const cacheEntry = {};
@@ -102,17 +130,23 @@ export async function getModule(name, version) {
         /** @type {Maintainers[]} */
         let maintainers;
         try {
-            const res = await fetch(`${NPM_REGISTRY}/${name}`);
-            if (!res.ok) throw res;
+            if (version.startsWith('github:')) {
+                const result = await fetchGithubPackage(version);
+                pkg = result;
+                maintainers = result.maintainers;
+            } else {
+                const res = await fetch(`${NPM_REGISTRY}/${name}`);
+                if (!res.ok) throw res;
 
-            /** @type {PackageMetaData} */
-            const pkgMeta = await (await fetch(`${NPM_REGISTRY}/${name}`)).json();
+                /** @type {PackageMetaData} */
+                const pkgMeta = await (await fetch(`${NPM_REGISTRY}/${name}`)).json();
 
-            if (pkgMeta?.error) throw new Error(pkgMeta.error);
+                if (pkgMeta?.error) throw new Error(pkgMeta.error);
 
-            version = getSatisfyingSemverVersion(pkgMeta, version);
-            pkg = pkgMeta.versions[version];
-            maintainers = pkgMeta.maintainers;
+                version = getSatisfyingSemverVersion(pkgMeta, version);
+                pkg = pkgMeta.versions[version];
+                maintainers = pkgMeta.maintainers;
+            }
         } catch (e) {
             const privateWarning = '\nPlease note that private packages are not supported.';
             if (e.status && e.status == 404)
@@ -122,7 +156,7 @@ export async function getModule(name, version) {
         }
 
         cacheEntry.module = {
-            key: createModuleKey(name, version),
+            key: cacheKey,
             pkg,
             maintainers,
         };
